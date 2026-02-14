@@ -38,7 +38,7 @@ Water Level Sensor (Analog) - ⚡ EC (Electrical Conductivity) Sensor
 Display layout:
 
 Line 0: Title + WiFi/MQTT status\
-Line 1: EC (µS/cm)\
+Line 1: EC (mS/cm)\
 Line 2: Water Level (%)\
 Line 3: IP Address or AP status
 
@@ -123,7 +123,9 @@ Required libraries:
 On first boot: - Device creates AP mode - Connect to ESP32 AP -
 Configure WiFi credentials - Device reboots and connects to your router
 
-Access dashboard via: http://DEVICE_IP/
+Access dashboard via: http://DEVICE_IP/ - (find your device ip on LCD Display)
+
+![hydroNode Dashboard](docs/images/ScreenshotUiHyrdoNode.png)
 
 ------------------------------------------------------------------------
 
@@ -156,7 +158,7 @@ mqtt:
 
     - name: "HydroNode EC"
       state_topic: "hydronode/status"
-      unit_of_measurement: "µS/cm"
+      unit_of_measurement: "mS/cm"
       value_template: "{{ value_json.ec }}"
 
     - name: "HydroNode Water Level"
