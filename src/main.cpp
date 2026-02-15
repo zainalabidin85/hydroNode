@@ -87,6 +87,13 @@ static const char* FW_VERSION = "ver-2.1.1";
 static const uint8_t API_VERSION = 1;
 
 /**************************************************************
+ * BASIC AUTH (UI only)
+ **************************************************************/
+static const char* UI_USER = "admin";
+static const char* UI_PASS = "hydronode";   // change to your own
+
+
+/**************************************************************
  * PINS (ESP32-C3 SuperMini)
  **************************************************************/
 // I2C for LCD
@@ -126,9 +133,9 @@ static const uint32_t TICK_UI_MS      = 100;
 static const uint32_t TICK_SENSOR_MS  = 250;
 static const uint32_t TICK_MQTT_MS    = 200;
 
-static const uint32_t SHORT_MS = 250;
-static const uint32_t LONG_MS  = 1800;
-static const uint32_t VLONG_MS = 8000;
+static const uint32_t SHORT_MS = 60;
+static const uint32_t LONG_MS  = 700;
+static const uint32_t VLONG_MS = 3500;
 
 static const uint8_t ADC_SAMPLES_PER_TICK = 16;
 
@@ -240,6 +247,9 @@ static Sensors sens;
  **************************************************************/
 static bool lcdBacklight = true;
 
+static const int MENU_N = 3;     // Setup, Calibration, Info/Exit
+static const int CAL_N  = 3;     // EC, Level, Back
+
 enum UIState : uint8_t {
   UI_HOME=0,
   UI_MENU,
@@ -253,7 +263,7 @@ enum UIState : uint8_t {
 
 static UIState ui = UI_HOME;
 
-static int menuIndex = 0;    // 0 Setup, 1 Calibration, 2 Info, 3 Exit
+static int menuIndex = 0;    // 0 Setup, 1 Calibration, 2 Info/Exit
 static int calIndex  = 0;    // 0 EC Wizard, 1 Level Wizard, 2 Back
 
 enum BtnId : uint8_t { BTN_LIGHT=0, BTN_UP=1, BTN_DN=2 };
@@ -585,9 +595,16 @@ static void sensorTick(){
   updateLevelDerived();
 
   // ✅ DS18B20 (non-blocking pattern)
-  float t = ds18.getTempCByIndex(0);        // read last completed conversion
-  if (t > -55.0f && t < 125.0f) sens.temp_c = t; // sanity range
-  ds18.requestTemperatures();               // start next conversion
+  static uint32_t lastTreq = 0;
+  float t = ds18.getTempCByIndex(0);
+  if (t > -55 && t < 125) sens.temp_c = t;
+
+  uint32_t now = millis();
+  if (now - lastTreq >= 1000) {
+    lastTreq = now;
+    ds18.requestTemperatures();
+  }
+
 }
 
 /**************************************************************
@@ -620,15 +637,15 @@ static EvType pollButton(BtnId id){
  **************************************************************/
 static void renderHome(){
   String w = (wifiSt.mode==WifiStatus::WIFI_STA && wifiSt.connected) ? "STA" : "AP ";
-  String m = mqttSt.connected ? "M" : " ";
+  String m = mqttSt.connected ? "Mqtt" : " ";
   lcdSetLine(0, "HydroNode " + w + " " + m);
 
   // L1: EC + Temp
   float ec_ms = sens.ec_us / 1000.0f;
 
   char l1[32];
-  if (isnan(sens.temp_c)) snprintf(l1, sizeof(l1), "EC:%4.2fuS  T:--.-C", ec_ms);
-  else                   snprintf(l1, sizeof(l1), "EC:%4.2fuS  T:%4.1fC", ec_ms, sens.temp_c);
+  if (isnan(sens.temp_c)) snprintf(l1, sizeof(l1), "EC:%4.2fmS  T:--.-C", ec_ms);
+  else                   snprintf(l1, sizeof(l1), "EC:%4.2fmS  T:%4.1fC", ec_ms, sens.temp_c);
   lcdSetLine(1, String(l1));
 
   char l2[32]; snprintf(l2, sizeof(l2), "Water: %6.1f %%", sens.lvl_percent);
@@ -649,14 +666,14 @@ static void renderSetup(){
   lcdSetLine(0, "Setup");
   lcdSetLine(1, "MQTT via Web API");
   lcdSetLine(2, "Hold LIGHT = WiFiRST");
-  lcdSetLine(3, "DN:Back");
+  lcdSetLine(3, "Back");
 }
 
 static void renderInfo(){
   lcdSetLine(0, String("FW: ")+FW_VERSION);
   lcdSetLine(1, String("MQTT: ")+(mqttSt.connected?"OK":"OFF"));
   lcdSetLine(2, String("Topic: ")+mqttCfg.base_topic);
-  lcdSetLine(3, "DN:Back");
+  lcdSetLine(3, "Back");
 }
 
 static void renderCalMenu(){
@@ -675,7 +692,7 @@ static void renderEcWizard(){
   } else if (ecStep == EC_A_CAP){
     lcdSetLine(1, "In A solution now");
     lcdSetLine(2, "ENT capture voltage");
-    lcdSetLine(3, "DN back");
+    lcdSetLine(3, "Back");
   } else if (ecStep == EC_B_SET){
     lcdSetLine(1, "Set B solution:");
     lcdSetLine(2, "B=" + String(ecWizardB,0) + " uS");
@@ -683,11 +700,11 @@ static void renderEcWizard(){
   } else if (ecStep == EC_B_CAP){
     lcdSetLine(1, "In B solution now");
     lcdSetLine(2, "ENT capture voltage");
-    lcdSetLine(3, "DN back");
+    lcdSetLine(3, "Back");
   } else {
     lcdSetLine(1, "Compute + Save");
     lcdSetLine(2, "ENT confirm");
-    lcdSetLine(3, "DN back");
+    lcdSetLine(3, "Back");
   }
 }
 
@@ -705,7 +722,7 @@ static void renderLevelWizard(){
   if (lvlStep == LVL_UNIT){
     lcdSetLine(1, "Select unit first");
     lcdSetLine(2, "ENT -> Unit setup");
-    lcdSetLine(3, "DN back");
+    lcdSetLine(3, "Back");
   } else if (lvlStep == LVL_EMPTY_SET){
     lcdSetLine(1, "Empty value:");
     lcdSetLine(2, String(lvlWizardEmpty,1));
@@ -713,7 +730,7 @@ static void renderLevelWizard(){
   } else if (lvlStep == LVL_EMPTY_CAP){
     lcdSetLine(1, "Set EMPTY state");
     lcdSetLine(2, "ENT capture voltage");
-    lcdSetLine(3, "DN back");
+    lcdSetLine(3, "Back");
   } else if (lvlStep == LVL_FULL_SET){
     lcdSetLine(1, "Full value:");
     lcdSetLine(2, String(lvlWizardFull,1));
@@ -721,11 +738,11 @@ static void renderLevelWizard(){
   } else if (lvlStep == LVL_FULL_CAP){
     lcdSetLine(1, "Set FULL state");
     lcdSetLine(2, "ENT capture voltage");
-    lcdSetLine(3, "DN back");
+    lcdSetLine(3, "Back");
   } else {
     lcdSetLine(1, "Compute + Save");
     lcdSetLine(2, "ENT confirm");
-    lcdSetLine(3, "DN back");
+    lcdSetLine(3, "Back");
   }
 }
 
@@ -755,7 +772,8 @@ static void handleEvent(BtnId b, EvType ev){
   if (b == BTN_LIGHT){
     if (ev == EV_SHORT){
       if (ui == UI_HOME) uiSet(UI_MENU);
-      else uiSet(UI_HOME);
+      else if (ui == UI_MENU) uiSet(UI_HOME);
+      else uiSet(UI_MENU); // ✅ BACK from any submenu to MENU
     } else if (ev == EV_LONG){
       lcdBacklight = !lcdBacklight;
     } else if (ev == EV_VLONG){
@@ -768,9 +786,9 @@ static void handleEvent(BtnId b, EvType ev){
     if (ev != EV_SHORT) return;
 
     if (ui == UI_MENU){
-      menuIndex = (menuIndex + 3) % 4;
+      menuIndex = (menuIndex + MENU_N - 1) % MENU_N;
     } else if (ui == UI_CAL_MENU){
-      calIndex = (calIndex + 2) % 3;
+      calIndex = (calIndex + CAL_N - 1) % CAL_N;
     } else if (ui == UI_CAL_EC){
       if (ecStep == EC_A_SET) ecWizardA += 10.0f;
       else if (ecStep == EC_B_SET) ecWizardB += 100.0f;
@@ -784,105 +802,182 @@ static void handleEvent(BtnId b, EvType ev){
   }
 
   if (b == BTN_DN){
-    if (ev != EV_SHORT) return;
 
+    // ----------------------------
+    // MENU LISTS: short = DOWN, long = ENTER
+    // ----------------------------
     if (ui == UI_MENU){
-      if (menuIndex == 0) uiSet(UI_SETUP);
-      else if (menuIndex == 1) uiSet(UI_CAL_MENU);
-      else uiSet(UI_INFO);
-      return;
-    }
-
-    if (ui == UI_SETUP || ui == UI_INFO){
-      uiSet(UI_HOME);
+      if (ev == EV_SHORT){
+        menuIndex = (menuIndex + 1) % MENU_N;   // ✅ DOWN
+      } else if (ev == EV_LONG){
+        // ✅ ENTER/SELECT
+        if (menuIndex == 0) uiSet(UI_SETUP);
+        else if (menuIndex == 1) uiSet(UI_CAL_MENU);
+        else uiSet(UI_INFO);
+      }
       return;
     }
 
     if (ui == UI_CAL_MENU){
-      if (calIndex == 0){
-        ecStep = EC_A_SET;
-        ecWizardA = ecCal.A.ec_us;
-        ecWizardB = ecCal.B.ec_us;
-        uiSet(UI_CAL_EC);
-      } else if (calIndex == 1){
-        lvlStep = LVL_UNIT;
+      if (ev == EV_SHORT){
+        calIndex = (calIndex + 1) % CAL_N;      // ✅ DOWN
+      } else if (ev == EV_LONG){
+        // ✅ ENTER/SELECT
+        if (calIndex == 0){
+          ecStep = EC_A_SET;
+          ecWizardA = ecCal.A.ec_us;
+          ecWizardB = ecCal.B.ec_us;
+          uiSet(UI_CAL_EC);
+        } else if (calIndex == 1){
+          lvlStep = LVL_UNIT;
+          lvlWizardEmpty = 0.0f;
+          lvlWizardFull  = (lvlCal.unit==UNIT_PERCENT) ? 100.0f : lvlCal.custom_max;
+          uiSet(UI_CAL_LEVEL);
+        } else {
+          uiSet(UI_MENU); // Back
+        }
+      }
+      return;
+    }
+
+    // ----------------------------
+    // OTHER SCREENS (WIZARDS):
+    // EV_SHORT = DOWN / DECREMENT (when setting values)
+    // EV_LONG  = ENTER / NEXT / CAPTURE / CONFIRM
+    // ----------------------------
+
+    if (ui == UI_SETUP || ui == UI_INFO){
+      if (ev == EV_SHORT || ev == EV_LONG) uiSet(UI_MENU);
+      return;
+    }
+
+    // ---------- EC Wizard ----------
+    if (ui == UI_CAL_EC){
+
+      if (ev == EV_SHORT){
+        // DOWN / decrement when setting numbers
+        if (ecStep == EC_A_SET) {
+          ecWizardA -= 10.0f;
+          if (ecWizardA < 0) ecWizardA = 0;
+        }
+        else if (ecStep == EC_B_SET) {
+          ecWizardB -= 100.0f;
+          if (ecWizardB < 0) ecWizardB = 0;
+        }
+        return;
+      }
+
+      if (ev == EV_LONG){
+        // ENTER / next / capture / confirm
+        if (ecStep == EC_A_SET) ecStep = EC_A_CAP;
+        else if (ecStep == EC_A_CAP){
+          ecCal.A.ec_us = ecWizardA;
+          ecCal.A.v     = sens.ec_v;
+          ecCal.A.set   = true;
+          saveEcCal();
+          ecStep = EC_B_SET;
+        }
+        else if (ecStep == EC_B_SET) ecStep = EC_B_CAP;
+        else if (ecStep == EC_B_CAP){
+          ecCal.B.ec_us = ecWizardB;
+          ecCal.B.v     = sens.ec_v;
+          ecCal.B.set   = true;
+          saveEcCal();
+          ecStep = EC_DONE;
+        }
+        else {
+          computeEcCal();
+          saveEcCal();
+          uiSet(UI_MENU);
+        }
+        return;
+      }
+
+      return;
+    }
+
+    // ---------- Level Unit ----------
+    if (ui == UI_LEVEL_UNIT){
+      if (ev == EV_SHORT){
+        // If you want DOWN here too (optional):
+        // toggle unit (same as UP) OR decrement custom max
+        if (lvlCal.unit == UNIT_CUSTOM) {
+          lvlCal.custom_max -= 1.0f;
+          if (lvlCal.custom_max < 1.0f) lvlCal.custom_max = 1.0f;
+        } else {
+          lvlCal.unit = UNIT_CUSTOM; // or toggle if you prefer
+        }
+        return;
+      }
+
+      if (ev == EV_LONG){
+        saveLevelCal();
+        uiSet(UI_CAL_LEVEL);
+        lvlStep = LVL_EMPTY_SET;
         lvlWizardEmpty = 0.0f;
         lvlWizardFull  = (lvlCal.unit==UNIT_PERCENT) ? 100.0f : lvlCal.custom_max;
-        uiSet(UI_CAL_LEVEL);
-      } else {
-        uiSet(UI_HOME);
+        return;
       }
+
       return;
     }
 
-    if (ui == UI_CAL_EC){
-      if (ecStep == EC_A_SET) ecStep = EC_A_CAP;
-      else if (ecStep == EC_A_CAP){
-        ecCal.A.ec_us = ecWizardA;
-        ecCal.A.v     = sens.ec_v;
-        ecCal.A.set   = true;
-        saveEcCal();
-        ecStep = EC_B_SET;
-      }
-      else if (ecStep == EC_B_SET) ecStep = EC_B_CAP;
-      else if (ecStep == EC_B_CAP){
-        ecCal.B.ec_us = ecWizardB;
-        ecCal.B.v     = sens.ec_v;
-        ecCal.B.set   = true;
-        saveEcCal();
-        ecStep = EC_DONE;
-      }
-      else {
-        computeEcCal();
-        saveEcCal();
-        uiSet(UI_HOME);
-      }
-      return;
-    }
-
-    if (ui == UI_LEVEL_UNIT){
-      saveLevelCal();
-      uiSet(UI_CAL_LEVEL);
-      lvlStep = LVL_EMPTY_SET;
-      lvlWizardEmpty = 0.0f;
-      lvlWizardFull  = (lvlCal.unit==UNIT_PERCENT) ? 100.0f : lvlCal.custom_max;
-      return;
-    }
-
+    // ---------- Level Wizard ----------
     if (ui == UI_CAL_LEVEL){
-      if (lvlStep == LVL_UNIT){
-        uiSet(UI_LEVEL_UNIT);
-      }
-      else if (lvlStep == LVL_EMPTY_SET) lvlStep = LVL_EMPTY_CAP;
-      else if (lvlStep == LVL_EMPTY_CAP){
-        lvlCal.empty.level = lvlWizardEmpty;
-        lvlCal.empty.v     = sens.lvl_v;
-        lvlCal.empty.set   = true;
-        saveLevelCal();
-        lvlStep = LVL_FULL_SET;
-      }
-      else if (lvlStep == LVL_FULL_SET) lvlStep = LVL_FULL_CAP;
-      else if (lvlStep == LVL_FULL_CAP){
-        lvlCal.full.level = lvlWizardFull;
-        lvlCal.full.v     = sens.lvl_v;
-        lvlCal.full.set   = true;
-        saveLevelCal();
-        lvlStep = LVL_DONE;
-      }
-      else {
-        if (lvlCal.unit == UNIT_CUSTOM) {
-          lvlCal.custom_max = lvlWizardFull;
+
+      if (ev == EV_SHORT){
+        // DOWN / decrement when setting numbers
+        if (lvlStep == LVL_EMPTY_SET) {
+          lvlWizardEmpty -= 1.0f;
+          // clamp
+          if (lvlWizardEmpty < 0) lvlWizardEmpty = 0;
         }
-        computeLevelCal();
-        saveLevelCal();
-        uiSet(UI_HOME);
+        else if (lvlStep == LVL_FULL_SET) {
+          lvlWizardFull -= 1.0f;
+          if (lvlWizardFull < 0) lvlWizardFull = 0;
+        }
+        return;
       }
+
+      if (ev == EV_LONG){
+        // ENTER / next / capture / confirm
+        if (lvlStep == LVL_UNIT){
+          uiSet(UI_LEVEL_UNIT);
+        }
+        else if (lvlStep == LVL_EMPTY_SET) lvlStep = LVL_EMPTY_CAP;
+        else if (lvlStep == LVL_EMPTY_CAP){
+          lvlCal.empty.level = lvlWizardEmpty;
+          lvlCal.empty.v     = sens.lvl_v;
+          lvlCal.empty.set   = true;
+          saveLevelCal();
+          lvlStep = LVL_FULL_SET;
+        }
+        else if (lvlStep == LVL_FULL_SET) lvlStep = LVL_FULL_CAP;
+        else if (lvlStep == LVL_FULL_CAP){
+          lvlCal.full.level = lvlWizardFull;
+          lvlCal.full.v     = sens.lvl_v;
+          lvlCal.full.set   = true;
+          saveLevelCal();
+          lvlStep = LVL_DONE;
+        }
+        else {
+          if (lvlCal.unit == UNIT_CUSTOM) lvlCal.custom_max = lvlWizardFull;
+          computeLevelCal();
+          saveLevelCal();
+          uiSet(UI_MENU);
+        }
+        return;
+      }
+
       return;
     }
 
-    uiSet(UI_HOME);
+    // default fallback
+    uiSet(UI_MENU);
     return;
+
   }
+
 }
 
 /**************************************************************
@@ -957,7 +1052,17 @@ static void sendJson(AsyncWebServerRequest *req, const JsonDocument& doc){
  * WEB: ROUTES
  **************************************************************/
 static void setupRoutes(){
-  server.serveStatic("/", LittleFS, "/www/").setDefaultFile("index.html");
+  // UI files protected in STA mode, but AP setup page stays open in AP mode
+  if (apMode) {
+    // Captive portal / setup must be accessible without password
+    server.serveStatic("/", LittleFS, "/www/").setDefaultFile("ap.html");
+  } else {
+    // Normal dashboard UI requires Basic Auth (browser popup)
+    server.serveStatic("/", LittleFS, "/www/")
+          .setDefaultFile("index.html")
+          .setAuthentication(UI_USER, UI_PASS);
+  }
+
 
   server.onNotFound([](AsyncWebServerRequest *req){
     if (apMode){
