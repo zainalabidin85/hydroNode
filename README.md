@@ -22,6 +22,7 @@ Water Level Sensor (Analog) - ⚡ EC (Electrical Conductivity) Sensor
 
 ## ✅ Web Interface
 
+-   Web-UI security (Login Authentic Requires)
 -   Real-time sensor dashboard
 -   WiFi configuration (AP fallback mode)
 -   MQTT configuration panel
@@ -124,6 +125,10 @@ On first boot: - Device creates AP mode - Connect to ESP32 AP -
 Configure WiFi credentials - Device reboots and connects to your router
 
 Access dashboard via: http://DEVICE_IP/ - (find your device ip on LCD Display)
+- Web-UI Login
+    - Username: admin
+    - Password: hydronode
+    - ** Web-UI credential can be changed via main.cpp  
 
 ![hydroNode Dashboard](docs/images/ScreenshotUiHyrdoNode.png)
 
