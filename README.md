@@ -9,6 +9,7 @@ Water Level Sensor (Analog) - ⚡ EC (Electrical Conductivity) Sensor
 (0--5V transmitter) - 📺 20x4 I2C LCD Display - 🌐 Built-in Async Web UI
 (LittleFS hosted) - 📡 Optional MQTT support for Home Assistant
 
+![preview](docs/images/front.png)
 ------------------------------------------------------------------------
 
 # 📦 Features
