@@ -1,66 +1,15 @@
 /**************************************************************
- * HydroNode (Merged) for ESP32-C3 SuperMini  ✅ FIXED WiFi/AP
+ * HydroNode (Merged) for ESP32-C3 SuperMini  ✅ MQTT-FIX VERSION
  *  - EC (0–5V transmitter, powered by 12V, output terminals: + and -)
  *  - Water Level (0–5V or 0–3.3V analog)
  *  - ✅ DS18B20 temperature sensor (GPIO5)
  *
- * LCD 20x4:
- *  L0: title + WiFi/MQTT icon
- *  L1: EC (uS/cm) + Temp (°C)
- *  L2: Water (%)
- *  L3: IP (STA) or AP hint
- *
- * Buttons (3):
- *  - LIGHT/MODE (BTN1):
- *      short: HOME <-> MENU
- *      long : toggle backlight
- *      vlong: wipe WiFi + restart
- *  - CAL/UP (BTN2):
- *      up navigation / adjust value
- *  - DOWN/ENTER (BTN3):
- *      select / enter / capture
- *
- * Web:
- *  - LittleFS serves /www (index.html, ap.html, app.js, style.css, etc.)
- *  - Captive portal fallback AP (HydroNode-Setup) with DNS catch-all
- *  - APIs:
- *      GET  /api/status
- *      GET  /api/ec
- *      GET  /api/level
- *      GET  /api/cal
- *      GET  /api/temp          ✅
- *      GET  /api/settings/mqtt
- *      POST /api/settings/mqtt   (JSON body)
- *      POST /api/wifi            ✅ (JSON body: {"ssid":"..","pass":".."})
- *
- * MQTT:
- *  - publishes:
- *      <base>/status   (JSON)
- *      <base>/ec       (number)
- *      <base>/level/percent
- *      <base>/level/value
- *      <base>/temp_c   ✅
- *
- * IMPORTANT WIRING (EC transmitter with terminals V+, V-, -, +):
- *  - Power: V+ = +12V, V- = 0V (12V ground)
- *  - Signal: "-" MUST connect to ESP32 GND (common ground)
- *           "+" -> voltage divider -> ESP32 ADC pin
- *
- * Divider (recommended) 47k/47k => ratio 2.0:
- *  "+" ---47k---+--- ADC
- *               |
- *              47k
- *               |
- *  "-" ---------+--- GND
- *
- * DS18B20 wiring:
- *  - VDD -> 3.3V
- *  - GND -> GND
- *  - DQ  -> GPIO5
- *  - 4.7k pull-up between DQ and 3.3V
- *
- * NOTES:
- *  - ESP32-C3 WiFi is 2.4GHz only (5GHz SSID will never connect)
+ * FIXES in this build:
+ *  ✅ MQTT will NOT block UI anymore:
+ *     - MQTT disabled automatically in AP mode / when WiFi not connected
+ *     - MQTT reconnect retries slowed down (default 15s)
+ *     - PubSubClient socket timeout reduced (1s)
+ *     - Buttons are polled BEFORE MQTT work
  **************************************************************/
 
 #include <Arduino.h>
@@ -76,14 +25,13 @@
 #include <PubSubClient.h>
 #include <LiquidCrystal_I2C.h>
 
-// ✅ DS18B20
 #include <OneWire.h>
 #include <DallasTemperature.h>
 
 /**************************************************************
  * VERSION
  **************************************************************/
-static const char* FW_VERSION = "ver-2.1.1";
+static const char* FW_VERSION = "ver-2.1.2-mqttfix";
 static const uint8_t API_VERSION = 1;
 
 /**************************************************************
@@ -91,7 +39,6 @@ static const uint8_t API_VERSION = 1;
  **************************************************************/
 static const char* UI_USER = "admin";
 static const char* UI_PASS = "hydronode";   // change to your own
-
 
 /**************************************************************
  * PINS (ESP32-C3 SuperMini)
@@ -109,7 +56,7 @@ static const int PIN_BTN_LIGHT = 2;  // LIGHT/MODE
 static const int PIN_BTN_UP    = 3;  // CAL/UP
 static const int PIN_BTN_DN    = 4;  // DOWN/ENTER
 
-// ✅ DS18B20 (1-Wire)
+// DS18B20 (1-Wire)
 static const int PIN_DS18B20   = 5;  // DATA pin
 
 // LCD
@@ -120,10 +67,7 @@ static const uint8_t LCD_ROWS = 4;
 /**************************************************************
  * DIVIDER RATIOS
  **************************************************************/
-// EC transmitter output is 0–5V. If using 47k/47k divider -> ratio = 2.0
 static const float EC_DIVIDER_RATIO = 2.0f;
-
-// Water level may also be 0–5V. If also divided by 47k/47k -> ratio = 2.0
 static const float LEVEL_DIVIDER_RATIO = 2.0f;
 
 /**************************************************************
@@ -150,7 +94,6 @@ Preferences prefs;
 WiFiClient wifiClient;
 PubSubClient mqtt(wifiClient);
 
-// ✅ DS18B20 objects
 OneWire oneWire(PIN_DS18B20);
 DallasTemperature ds18(&oneWire);
 
@@ -187,7 +130,7 @@ enum CalQuality : uint8_t { CAL_NONE=0, CAL_WEAK=1, CAL_OK=2 };
 
 struct EcCalPoint {
   float ec_us = 1413.0f;
-  float v = 0.0f;   // captured voltage (0–5V, before divider)
+  float v = 0.0f;
   bool set = false;
 };
 
@@ -203,8 +146,8 @@ struct EcCal {
 enum LevelUnit : uint8_t { UNIT_PERCENT=0, UNIT_CUSTOM=1 };
 
 struct LevelCalPoint {
-  float level = 0.0f; // 0..100 or 0..custom_max
-  float v = 0.0f;     // captured voltage (before divider)
+  float level = 0.0f;
+  float v = 0.0f;
   bool set = false;
 };
 
@@ -231,7 +174,7 @@ struct Sensors {
   float lvl_value = 0.0f;
   float lvl_percent = 0.0f;
 
-  // ✅ TEMP (DS18B20)
+  // TEMP
   float temp_c = NAN;
 };
 
@@ -247,8 +190,8 @@ static Sensors sens;
  **************************************************************/
 static bool lcdBacklight = true;
 
-static const int MENU_N = 3;     // Setup, Calibration, Info/Exit
-static const int CAL_N  = 3;     // EC, Level, Back
+static const int MENU_N = 3;
+static const int CAL_N  = 3;
 
 enum UIState : uint8_t {
   UI_HOME=0,
@@ -263,8 +206,8 @@ enum UIState : uint8_t {
 
 static UIState ui = UI_HOME;
 
-static int menuIndex = 0;    // 0 Setup, 1 Calibration, 2 Info/Exit
-static int calIndex  = 0;    // 0 EC Wizard, 1 Level Wizard, 2 Back
+static int menuIndex = 0;
+static int calIndex  = 0;
 
 enum BtnId : uint8_t { BTN_LIGHT=0, BTN_UP=1, BTN_DN=2 };
 enum EvType : uint8_t { EV_NONE=0, EV_SHORT=1, EV_LONG=2, EV_VLONG=3 };
@@ -360,7 +303,7 @@ static void startAP(){
   wifiSt.ssid = "HydroNode-Setup";
   wifiSt.ip = ipToString(ip);
 
-  dnsServer.start(53, "*", ip); // catch-all
+  dnsServer.start(53, "*", ip);
 }
 
 static void startSTA(){
@@ -550,9 +493,7 @@ static float levelAdcToProbeVoltage(uint16_t adc){
 }
 
 static float ecVoltageToUs(float v){
-  if (!ecCal.valid) {
-    return v * 10000.0f; // fallback
-  }
+  if (!ecCal.valid) return v * 10000.0f; // fallback
   return ecCal.slope * v + ecCal.offset;
 }
 
@@ -594,7 +535,7 @@ static void sensorTick(){
 
   updateLevelDerived();
 
-  // ✅ DS18B20 (non-blocking pattern)
+  // DS18B20 non-blocking
   static uint32_t lastTreq = 0;
   float t = ds18.getTempCByIndex(0);
   if (t > -55 && t < 125) sens.temp_c = t;
@@ -604,7 +545,6 @@ static void sensorTick(){
     lastTreq = now;
     ds18.requestTemperatures();
   }
-
 }
 
 /**************************************************************
@@ -628,7 +568,6 @@ static EvType pollButton(BtnId id){
     if (dur >= LONG_MS)  return EV_LONG;
     if (dur >= SHORT_MS) return EV_SHORT;
   }
-
   return EV_NONE;
 }
 
@@ -637,10 +576,9 @@ static EvType pollButton(BtnId id){
  **************************************************************/
 static void renderHome(){
   String w = (wifiSt.mode==WifiStatus::WIFI_STA && wifiSt.connected) ? "STA" : "AP ";
-  String m = mqttSt.connected ? "Mqtt" : " ";
+  String m = mqttSt.connected ? "M" : " ";
   lcdSetLine(0, "HydroNode " + w + " " + m);
 
-  // L1: EC + Temp
   float ec_ms = sens.ec_us / 1000.0f;
 
   char l1[32];
@@ -773,7 +711,7 @@ static void handleEvent(BtnId b, EvType ev){
     if (ev == EV_SHORT){
       if (ui == UI_HOME) uiSet(UI_MENU);
       else if (ui == UI_MENU) uiSet(UI_HOME);
-      else uiSet(UI_MENU); // ✅ BACK from any submenu to MENU
+      else uiSet(UI_MENU);
     } else if (ev == EV_LONG){
       lcdBacklight = !lcdBacklight;
     } else if (ev == EV_VLONG){
@@ -802,15 +740,11 @@ static void handleEvent(BtnId b, EvType ev){
   }
 
   if (b == BTN_DN){
-
-    // ----------------------------
-    // MENU LISTS: short = DOWN, long = ENTER
-    // ----------------------------
+    // MENU: short=DOWN, long=ENTER
     if (ui == UI_MENU){
       if (ev == EV_SHORT){
-        menuIndex = (menuIndex + 1) % MENU_N;   // ✅ DOWN
+        menuIndex = (menuIndex + 1) % MENU_N;
       } else if (ev == EV_LONG){
-        // ✅ ENTER/SELECT
         if (menuIndex == 0) uiSet(UI_SETUP);
         else if (menuIndex == 1) uiSet(UI_CAL_MENU);
         else uiSet(UI_INFO);
@@ -820,9 +754,8 @@ static void handleEvent(BtnId b, EvType ev){
 
     if (ui == UI_CAL_MENU){
       if (ev == EV_SHORT){
-        calIndex = (calIndex + 1) % CAL_N;      // ✅ DOWN
+        calIndex = (calIndex + 1) % CAL_N;
       } else if (ev == EV_LONG){
-        // ✅ ENTER/SELECT
         if (calIndex == 0){
           ecStep = EC_A_SET;
           ecWizardA = ecCal.A.ec_us;
@@ -834,41 +767,25 @@ static void handleEvent(BtnId b, EvType ev){
           lvlWizardFull  = (lvlCal.unit==UNIT_PERCENT) ? 100.0f : lvlCal.custom_max;
           uiSet(UI_CAL_LEVEL);
         } else {
-          uiSet(UI_MENU); // Back
+          uiSet(UI_MENU);
         }
       }
       return;
     }
 
-    // ----------------------------
-    // OTHER SCREENS (WIZARDS):
-    // EV_SHORT = DOWN / DECREMENT (when setting values)
-    // EV_LONG  = ENTER / NEXT / CAPTURE / CONFIRM
-    // ----------------------------
-
+    // Others: short=decrement/back, long=enter/next
     if (ui == UI_SETUP || ui == UI_INFO){
       if (ev == EV_SHORT || ev == EV_LONG) uiSet(UI_MENU);
       return;
     }
 
-    // ---------- EC Wizard ----------
     if (ui == UI_CAL_EC){
-
       if (ev == EV_SHORT){
-        // DOWN / decrement when setting numbers
-        if (ecStep == EC_A_SET) {
-          ecWizardA -= 10.0f;
-          if (ecWizardA < 0) ecWizardA = 0;
-        }
-        else if (ecStep == EC_B_SET) {
-          ecWizardB -= 100.0f;
-          if (ecWizardB < 0) ecWizardB = 0;
-        }
+        if (ecStep == EC_A_SET) { ecWizardA -= 10.0f; if (ecWizardA < 0) ecWizardA = 0; }
+        else if (ecStep == EC_B_SET) { ecWizardB -= 100.0f; if (ecWizardB < 0) ecWizardB = 0; }
         return;
       }
-
       if (ev == EV_LONG){
-        // ENTER / next / capture / confirm
         if (ecStep == EC_A_SET) ecStep = EC_A_CAP;
         else if (ecStep == EC_A_CAP){
           ecCal.A.ec_us = ecWizardA;
@@ -876,40 +793,33 @@ static void handleEvent(BtnId b, EvType ev){
           ecCal.A.set   = true;
           saveEcCal();
           ecStep = EC_B_SET;
-        }
-        else if (ecStep == EC_B_SET) ecStep = EC_B_CAP;
+        } else if (ecStep == EC_B_SET) ecStep = EC_B_CAP;
         else if (ecStep == EC_B_CAP){
           ecCal.B.ec_us = ecWizardB;
           ecCal.B.v     = sens.ec_v;
           ecCal.B.set   = true;
           saveEcCal();
           ecStep = EC_DONE;
-        }
-        else {
+        } else {
           computeEcCal();
           saveEcCal();
           uiSet(UI_MENU);
         }
         return;
       }
-
       return;
     }
 
-    // ---------- Level Unit ----------
     if (ui == UI_LEVEL_UNIT){
       if (ev == EV_SHORT){
-        // If you want DOWN here too (optional):
-        // toggle unit (same as UP) OR decrement custom max
         if (lvlCal.unit == UNIT_CUSTOM) {
           lvlCal.custom_max -= 1.0f;
           if (lvlCal.custom_max < 1.0f) lvlCal.custom_max = 1.0f;
         } else {
-          lvlCal.unit = UNIT_CUSTOM; // or toggle if you prefer
+          lvlCal.unit = UNIT_CUSTOM;
         }
         return;
       }
-
       if (ev == EV_LONG){
         saveLevelCal();
         uiSet(UI_CAL_LEVEL);
@@ -918,49 +828,33 @@ static void handleEvent(BtnId b, EvType ev){
         lvlWizardFull  = (lvlCal.unit==UNIT_PERCENT) ? 100.0f : lvlCal.custom_max;
         return;
       }
-
       return;
     }
 
-    // ---------- Level Wizard ----------
     if (ui == UI_CAL_LEVEL){
-
       if (ev == EV_SHORT){
-        // DOWN / decrement when setting numbers
-        if (lvlStep == LVL_EMPTY_SET) {
-          lvlWizardEmpty -= 1.0f;
-          // clamp
-          if (lvlWizardEmpty < 0) lvlWizardEmpty = 0;
-        }
-        else if (lvlStep == LVL_FULL_SET) {
-          lvlWizardFull -= 1.0f;
-          if (lvlWizardFull < 0) lvlWizardFull = 0;
-        }
+        if (lvlStep == LVL_EMPTY_SET) { lvlWizardEmpty -= 1.0f; if (lvlWizardEmpty < 0) lvlWizardEmpty = 0; }
+        else if (lvlStep == LVL_FULL_SET) { lvlWizardFull -= 1.0f; if (lvlWizardFull < 0) lvlWizardFull = 0; }
         return;
       }
-
       if (ev == EV_LONG){
-        // ENTER / next / capture / confirm
         if (lvlStep == LVL_UNIT){
           uiSet(UI_LEVEL_UNIT);
-        }
-        else if (lvlStep == LVL_EMPTY_SET) lvlStep = LVL_EMPTY_CAP;
+        } else if (lvlStep == LVL_EMPTY_SET) lvlStep = LVL_EMPTY_CAP;
         else if (lvlStep == LVL_EMPTY_CAP){
           lvlCal.empty.level = lvlWizardEmpty;
           lvlCal.empty.v     = sens.lvl_v;
           lvlCal.empty.set   = true;
           saveLevelCal();
           lvlStep = LVL_FULL_SET;
-        }
-        else if (lvlStep == LVL_FULL_SET) lvlStep = LVL_FULL_CAP;
+        } else if (lvlStep == LVL_FULL_SET) lvlStep = LVL_FULL_CAP;
         else if (lvlStep == LVL_FULL_CAP){
           lvlCal.full.level = lvlWizardFull;
           lvlCal.full.v     = sens.lvl_v;
           lvlCal.full.set   = true;
           saveLevelCal();
           lvlStep = LVL_DONE;
-        }
-        else {
+        } else {
           if (lvlCal.unit == UNIT_CUSTOM) lvlCal.custom_max = lvlWizardFull;
           computeLevelCal();
           saveLevelCal();
@@ -968,22 +862,24 @@ static void handleEvent(BtnId b, EvType ev){
         }
         return;
       }
-
       return;
     }
 
-    // default fallback
     uiSet(UI_MENU);
     return;
-
   }
-
 }
 
 /**************************************************************
- * MQTT
+ * MQTT (FIXED: no UI stall)
  **************************************************************/
 static void mqttEnsure(){
+  // ✅ NEVER try MQTT in AP mode or without WiFi
+  if (apMode || WiFi.status() != WL_CONNECTED) {
+    mqttSt.connected = false;
+    return;
+  }
+
   mqttSt.configured = mqttCfg.enabled && mqttCfg.host.length() > 0;
   if (!mqttSt.configured) return;
 
@@ -994,8 +890,9 @@ static void mqttEnsure(){
     return;
   }
 
+  // ✅ Slow reconnect attempts (reduces stall frequency if broker down)
   uint32_t now = millis();
-  if (now - mqttSt.lastAttemptMs < 3000) return;
+  if (now - mqttSt.lastAttemptMs < 15000) return;
   mqttSt.lastAttemptMs = now;
 
   String cid = String("hydronode-") + String((uint32_t)ESP.getEfuseMac(), HEX);
@@ -1010,6 +907,7 @@ static void mqttEnsure(){
 
 static void mqttPublish(){
   if (!mqttSt.connected) return;
+  if (apMode || WiFi.status() != WL_CONNECTED) return; // safety
 
   uint32_t now = millis();
   if (now - mqttSt.lastPublishMs < mqttCfg.pub_period_ms) return;
@@ -1027,7 +925,7 @@ static void mqttPublish(){
   doc["level_percent"] = sens.lvl_percent;
   doc["level_value"] = sens.lvl_value;
   doc["level_v"] = sens.lvl_v;
-  doc["temp_c"] = sens.temp_c; // ✅
+  doc["temp_c"] = sens.temp_c;
 
   String payload;
   serializeJson(doc, payload);
@@ -1036,7 +934,11 @@ static void mqttPublish(){
   mqtt.publish((base + "/ec").c_str(), String(sens.ec_us, 0).c_str(), mqttCfg.retain);
   mqtt.publish((base + "/level/percent").c_str(), String(sens.lvl_percent, 1).c_str(), mqttCfg.retain);
   mqtt.publish((base + "/level/value").c_str(), String(sens.lvl_value, 2).c_str(), mqttCfg.retain);
-  mqtt.publish((base + "/temp_c").c_str(), String(sens.temp_c, 1).c_str(), mqttCfg.retain); // ✅
+
+  // avoid publishing "nan"
+  if (!isnan(sens.temp_c)) {
+    mqtt.publish((base + "/temp_c").c_str(), String(sens.temp_c, 1).c_str(), mqttCfg.retain);
+  }
 }
 
 /**************************************************************
@@ -1052,17 +954,13 @@ static void sendJson(AsyncWebServerRequest *req, const JsonDocument& doc){
  * WEB: ROUTES
  **************************************************************/
 static void setupRoutes(){
-  // UI files protected in STA mode, but AP setup page stays open in AP mode
   if (apMode) {
-    // Captive portal / setup must be accessible without password
     server.serveStatic("/", LittleFS, "/www/").setDefaultFile("ap.html");
   } else {
-    // Normal dashboard UI requires Basic Auth (browser popup)
     server.serveStatic("/", LittleFS, "/www/")
           .setDefaultFile("index.html")
           .setAuthentication(UI_USER, UI_PASS);
   }
-
 
   server.onNotFound([](AsyncWebServerRequest *req){
     if (apMode){
@@ -1073,8 +971,6 @@ static void setupRoutes(){
     req->send(404, "text/plain", "Not found");
   });
 
-  // ✅ WiFi provisioning endpoint
-  // Body: {"ssid":"...","pass":"..."}
   server.on("/api/wifi", HTTP_POST,
     [](AsyncWebServerRequest *req){},
     NULL,
@@ -1129,8 +1025,7 @@ static void setupRoutes(){
     doc["mqtt"]["base_topic"] = mqttCfg.base_topic;
     doc["mqtt"]["err"] = mqttSt.err;
 
-    doc["temp_c"] = sens.temp_c; // ✅
-
+    doc["temp_c"] = sens.temp_c;
     sendJson(req, doc);
   });
 
@@ -1155,7 +1050,6 @@ static void setupRoutes(){
     sendJson(req, doc);
   });
 
-  // ✅ DS18B20 endpoint
   server.on("/api/temp", HTTP_GET, [](AsyncWebServerRequest *req){
     StaticJsonDocument<256> doc;
     doc["ok"] = true;
@@ -1260,23 +1154,21 @@ void setup(){
 
   lcdInit();
 
-  // ✅ DS18B20 init (non-blocking conversions)
   ds18.begin();
   ds18.setWaitForConversion(false);
-  ds18.requestTemperatures(); // start first conversion
+  ds18.requestTemperatures();
 
   loadMqtt();
+  mqtt.setSocketTimeout(1);          // ✅ key fix: reduce blocking time
   loadEcCal();
   loadLevelCal();
   computeEcCal();
   computeLevelCal();
 
-  // Mount FS first (so AP captive portal can serve /www/ap.html)
   if (!LittleFS.begin(true)){
     Serial.println("LittleFS mount failed");
   }
 
-  // Start STA (using saved creds), fallback to AP after timeout
   startSTA();
   uint32_t t0 = millis();
   while (millis() - t0 < 8000){
@@ -1298,13 +1190,7 @@ void loop(){
   static uint32_t lastUi=0, lastSensor=0, lastMqtt=0;
   uint32_t now = millis();
 
-  wifiTick();
-
-  if (now - lastSensor >= TICK_SENSOR_MS){
-    lastSensor = now;
-    sensorTick();
-  }
-
+  // ✅ Buttons FIRST (so UI stays responsive)
   EvType e0 = pollButton(BTN_LIGHT);
   EvType e1 = pollButton(BTN_UP);
   EvType e2 = pollButton(BTN_DN);
@@ -1313,11 +1199,22 @@ void loop(){
   handleEvent(BTN_UP, e1);
   handleEvent(BTN_DN, e2);
 
+  // WiFi + captive portal
+  wifiTick();
+
+  // Sensors
+  if (now - lastSensor >= TICK_SENSOR_MS){
+    lastSensor = now;
+    sensorTick();
+  }
+
+  // LCD
   if (now - lastUi >= TICK_UI_MS){
     lastUi = now;
     lcdTick();
   }
 
+  // MQTT LAST (never let it block buttons)
   if (now - lastMqtt >= TICK_MQTT_MS){
     lastMqtt = now;
     mqttEnsure();
